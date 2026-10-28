@@ -1,0 +1,754 @@
+     1→'use client'
+     2→
+     3→import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
+     4→import { Button } from '@/components/ui/button'
+     5→import { Textarea } from '@/components/ui/textarea'
+     6→import {
+     7→  Card,
+     8→  CardContent,
+     9→  CardDescription,
+    10→  CardHeader,
+    11→  CardTitle,
+    12→} from '@/components/ui/card'
+    13→import {
+    14→  AudioLines,
+    15→  Upload,
+    16→  Play,
+    17→  Pause,
+    18→  Undo2,
+    19→  Download,
+    20→  Trash2,
+    21→  RotateCcw,
+    22→  Music,
+    23→  FileText,
+    24→  Wand2,
+    25→  Keyboard,
+    26→} from 'lucide-react'
+    27→
+    28→interface Word {
+    29→  text: string
+    30→  lineIndex: number
+    31→  timestamp: number | null // detik (float), null = belum tersinkronisasi
+    32→}
+    33→
+    34→interface SavedState {
+    35→  lyricsText: string
+    36→  words: Word[]
+    37→  pointer: number
+    38→  audioName: string
+    39→}
+    40→
+    41→const STORAGE_KEY = 'lrc-sync-state-v1'
+    42→
+    43→/** Format detik -> mm:ss.xx (Enhanced LRC, centisecond 2 digit) */
+    44→function formatTimestamp(seconds: number): string {
+    45→  const totalCentis = Math.round(seconds * 100)
+    46→  const minutes = Math.floor(totalCentis / 6000)
+    47→  const secs = Math.floor((totalCentis % 6000) / 100)
+    48→  const centis = totalCentis % 100
+    49→  return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(centis).padStart(2, '0')}`
+    50→}
+    51→
+    52→export default function Home() {
+    53→  // --- State utama ---
+    54→  const [audioName, setAudioName] = useState('')
+    55→  const [audioUrl, setAudioUrl] = useState('')
+    56→  const [lyricsText, setLyricsText] = useState('')
+    57→  const [words, setWords] = useState<Word[]>([])
+    58→  const [pointer, setPointer] = useState(0)
+    59→  const [currentTime, setCurrentTime] = useState(0)
+    60→  const [duration, setDuration] = useState(0)
+    61→  const [isPlaying, setIsPlaying] = useState(false)
+    62→  const [restored, setRestored] = useState(false)
+    63→  const [showEditPanel, setShowEditPanel] = useState(false)
+    64→
+    65→  const audioRef = useRef<HTMLAudioElement>(null)
+    66→  const fileInputRef = useRef<HTMLInputElement>(null)
+    67→
+    68→  // --- Restore dari localStorage saat mount ---
+    69→  useEffect(() => {
+    70→    try {
+    71→      const saved = localStorage.getItem(STORAGE_KEY)
+    72→      if (saved) {
+    73→        const data = JSON.parse(saved) as SavedState
+    74→        if (typeof data.lyricsText === 'string') setLyricsText(data.lyricsText)
+    75→        if (Array.isArray(data.words)) setWords(data.words)
+    76→        if (typeof data.pointer === 'number') setPointer(data.pointer)
+    77→        if (typeof data.audioName === 'string') setAudioName(data.audioName)
+    78→      }
+    79→    } catch (e) {
+    80→      console.error('Gagal memuat data tersimpan', e)
+    81→    } finally {
+    82→      setRestored(true)
+    83→    }
+    84→  }, [])
+    85→
+    86→  // --- Persist ke localStorage ---
+    87→  useEffect(() => {
+    88→    if (!restored) return
+    89→    try {
+    90→      const data: SavedState = { lyricsText, words, pointer, audioName }
+    91→      localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
+    92→    } catch (e) {
+    93→      console.error('Gagal menyimpan progres', e)
+    94→    }
+    95→  }, [lyricsText, words, pointer, audioName, restored])
+    96→
+    97→  // --- Update waktu audio secara halus dengan rAF ---
+    98→  useEffect(() => {
+    99→    let raf = 0
+   100→    const tick = () => {
+   101→      const audio = audioRef.current
+   102→      if (audio && !audio.paused) {
+   103→        setCurrentTime(audio.currentTime)
+   104→      }
+   105→      raf = requestAnimationFrame(tick)
+   106→    }
+   107→    raf = requestAnimationFrame(tick)
+   108→    return () => cancelAnimationFrame(raf)
+   109→  }, [])
+   110→
+   111→  // --- Upload audio ---
+   112→  const handleAudioUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+   113→    const file = e.target.files?.[0]
+   114→    if (!file) return
+   115→    if (audioUrl) URL.revokeObjectURL(audioUrl)
+   116→    const url = URL.createObjectURL(file)
+   117→    setAudioUrl(url)
+   118→    setAudioName(file.name.replace(/\.[^.]+$/, ''))
+   119→    setCurrentTime(0)
+   120→    setIsPlaying(false)
+   121→  }
+   122→
+   123→  // --- Load lyrics: parse plain text -> array of Word ---
+   124→  const loadLyrics = useCallback(() => {
+   125→    if (!lyricsText.trim()) return
+   126→    // Konfirmasi jika sudah ada kata tersinkronisasi
+   127→    if (words.some((w) => w.timestamp !== null)) {
+   128→      const ok = window.confirm(
+   129→        'Memuat ulang lirik akan menghapus timestamp yang sudah Anda buat. Lanjutkan?'
+   130→      )
+   131→      if (!ok) return
+   132→    }
+   133→    const lines = lyricsText
+   134→      .split('\n')
+   135→      .map((l) => l.trim())
+   136→      .filter((l) => l !== '')
+   137→    const newWords: Word[] = []
+   138→    lines.forEach((line, lineIdx) => {
+   139→      const tokens = line.split(/\s+/)
+   140→      tokens.forEach((tok) => {
+   141→        newWords.push({ text: tok, lineIndex: lineIdx, timestamp: null })
+   142→      })
+   143→    })
+   144→    setWords(newWords)
+   145→    setPointer(0)
+   146→    setShowEditPanel(false)
+   147→    // Blur agar tombol tidak tertahan fokus (spasi/enter langsung ke sync)
+   148→    if (document.activeElement instanceof HTMLElement) {
+   149→      document.activeElement.blur()
+   150→    }
+   151→  }, [lyricsText, words])
+   152→
+   153→  // --- Toggle play/pause ---
+   154→  const togglePlay = useCallback(() => {
+   155→    const audio = audioRef.current
+   156→    if (!audio || !audioUrl) return
+   157→    if (audio.paused) {
+   158→      void audio.play().catch(() => {})
+   159→    } else {
+   160→      audio.pause()
+   161→    }
+   162→  }, [audioUrl])
+   163→
+   164→  // --- Catat timestamp kata aktif & majukan pointer ---
+   165→  const recordTimestamp = useCallback(() => {
+   166→    const audio = audioRef.current
+   167→    if (!audio || !audioUrl || words.length === 0) return
+   168→    const t = audio.currentTime
+   169→    setWords((prev) => {
+   170→      if (prev.length === 0) return prev
+   171→      const next = prev.slice()
+   172→      const target = Math.min(pointer, next.length - 1)
+   173→      next[target] = { ...next[target], timestamp: t }
+   174→      return next
+   175→    })
+   176→    setPointer((prev) => Math.min(prev + 1, words.length - 1))
+   177→  }, [audioUrl, pointer, words.length])
+   178→
+   179→  // --- Undo: mundur satu kata ---
+   180→  const undo = useCallback(() => {
+   181→    setPointer((prev) => Math.max(prev - 1, 0))
+   182→  }, [])
+   183→
+   184→  // --- Keyboard shortcuts global ---
+   185→  useEffect(() => {
+   186→    const handleKey = (e: KeyboardEvent) => {
+   187→      if (words.length === 0) return
+   188→      const activeEl = document.activeElement
+   189→      const isTypingTarget =
+   190→        activeEl instanceof HTMLTextAreaElement ||
+   191→        (activeEl instanceof HTMLInputElement &&
+   192→          activeEl.type !== 'range' &&
+   193→          activeEl.type !== 'checkbox' &&
+   194→          activeEl.type !== 'file') ||
+   195→        (activeEl instanceof HTMLElement && activeEl.isContentEditable)
+   196→      if (isTypingTarget) return
+   197→
+   198→      if (e.code === 'Space') {
+   199→        e.preventDefault()
+   200→        togglePlay()
+   201→      } else if (e.code === 'Enter') {
+   202→        e.preventDefault()
+   203→        recordTimestamp()
+   204→      } else if (e.code === 'Backspace') {
+   205→        e.preventDefault()
+   206→        undo()
+   207→      }
+   208→    }
+   209→    window.addEventListener('keydown', handleKey)
+   210→    return () => window.removeEventListener('keydown', handleKey)
+   211→  }, [words.length, togglePlay, recordTimestamp, undo])
+   212→
+   213→  // --- Seek progress bar ---
+   214→  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+   215→    const audio = audioRef.current
+   216→    if (!audio || !duration) return
+   217→    const rect = e.currentTarget.getBoundingClientRect()
+   218→    const ratio = Math.min(Math.max((e.clientX - rect.left) / rect.width, 0), 1)
+   219→    audio.currentTime = ratio * duration
+   220→    setCurrentTime(audio.currentTime)
+   221→  }
+   222→
+   223→  // --- Kelompokkan kata per baris (urut global dipertahankan) ---
+   224→  const groupedWords = useMemo(() => {
+   225→    const groups: {
+   226→      lineIndex: number
+   227→      items: { word: Word; globalIdx: number }[]
+   228→    }[] = []
+   229→    let currentLine = -1
+   230→    let currentGroup: {
+   231→      lineIndex: number
+   232→      items: { word: Word; globalIdx: number }[]
+   233→    } | null = null
+   234→    words.forEach((word, idx) => {
+   235→      if (word.lineIndex !== currentLine) {
+   236→        currentGroup = { lineIndex: word.lineIndex, items: [] }
+   237→        groups.push(currentGroup)
+   238→        currentLine = word.lineIndex
+   239→      }
+   240→      currentGroup!.items.push({ word, globalIdx: idx })
+   241→    })
+   242→    return groups
+   243→  }, [words])
+   244→
+   245→  const syncedCount = useMemo(
+   246→    () => words.filter((w) => w.timestamp !== null).length,
+   247→    [words]
+   248→  )
+   249→  const allSynced = words.length > 0 && syncedCount === words.length
+   250→  const progress = duration > 0 ? (currentTime / duration) * 100 : 0
+   251→
+   252→  // --- Export Enhanced LRC ---
+   253→  const exportLrc = useCallback(() => {
+   254→    if (words.length === 0) return
+   255→    const sortedGroups = [...groupedWords].sort(
+   256→      (a, b) => a.lineIndex - b.lineIndex
+   257→    )
+   258→    const lrcLines = sortedGroups.map((group) => {
+   259→      const firstTime = group.items[0].word.timestamp ?? 0
+   260→      const parts = group.items.map(({ word }) => {
+   261→        const t = word.timestamp ?? 0
+   262→        return `<${formatTimestamp(t)}>${word.text}`
+   263→      })
+   264→      return `[${formatTimestamp(firstTime)}]${parts.join(' ')}`
+   265→    })
+   266→
+   267→    const header: string[] = []
+   268→    if (audioName) header.push(`[ti:${audioName}]`)
+   269→    if (duration > 0) header.push(`[length:${formatTimestamp(duration)}]`)
+   270→    header.push(`[re:enhanced]`)
+   271→    const content =
+   272→      (header.length > 0 ? header.join('\n') + '\n' : '') +
+   273→      lrcLines.join('\n') +
+   274→      '\n'
+   275→
+   276→    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
+   277→    const url = URL.createObjectURL(blob)
+   278→    const a = document.createElement('a')
+   279→    a.href = url
+   280→    a.download = `${audioName || 'lirik'}.lrc`
+   281→    document.body.appendChild(a)
+   282→    a.click()
+   283→    document.body.removeChild(a)
+   284→    URL.revokeObjectURL(url)
+   285→  }, [words, groupedWords, audioName, duration])
+   286→
+   287→  // --- Reset semua ---
+   288→  const resetAll = useCallback(() => {
+   289→    const ok = window.confirm(
+   290→      'Hapus SEMUA data (lirik, timestamp, nama audio)? Tindakan ini tidak bisa dibatalkan.'
+   291→    )
+   292→    if (!ok) return
+   293→    setWords([])
+   294→    setLyricsText('')
+   295→    setPointer(0)
+   296→    setAudioName('')
+   297→    setAudioUrl('')
+   298→    setCurrentTime(0)
+   299→    setDuration(0)
+   300→    setShowEditPanel(false)
+   301→    if (fileInputRef.current) fileInputRef.current.value = ''
+   302→    try {
+   303→      localStorage.removeItem(STORAGE_KEY)
+   304→    } catch {
+   305→      /* noop */
+   306→    }
+   307→  }, [])
+   308→
+   309→  // --- Bersihkan timestamp saja (pertahankan lirik) ---
+   310→  const clearTimestamps = useCallback(() => {
+   311→    const ok = window.confirm('Bersihkan semua timestamp? Kata-kata tetap dipertahankan.')
+   312→    if (!ok) return
+   313→    setWords((prev) => prev.map((w) => ({ ...w, timestamp: null })))
+   314→    setPointer(0)
+   315→  }, [])
+   316→
+   317→  const syncedPct =
+   318→    words.length > 0 ? Math.round((syncedCount / words.length) * 100) : 0
+   319→
+   320→  return (
+   321→    <div className="min-h-screen flex flex-col bg-neutral-50 text-neutral-900">
+   322→      {/* Hidden audio element */}
+   323→      <audio
+   324→        ref={audioRef}
+   325→        src={audioUrl || undefined}
+   326→        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+   327→        onDurationChange={(e) => setDuration(e.currentTarget.duration || 0)}
+   328→        onPlay={() => setIsPlaying(true)}
+   329→        onPause={() => setIsPlaying(false)}
+   330→        onEnded={() => setIsPlaying(false)}
+   331→        className="hidden"
+   332→      />
+   333→
+   334→      {/* Header */}
+   335→      <header className="bg-neutral-900 text-white shadow-lg">
+   336→        <div className="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between gap-3">
+   337→          <div className="flex items-center gap-3">
+   338→            <div className="size-9 rounded-lg bg-amber-400 text-neutral-900 flex items-center justify-center shrink-0">
+   339→              <AudioLines className="size-5" />
+   340→            </div>
+   341→            <div>
+   342→              <h1 className="text-lg font-bold leading-tight">LRC Sync Studio</h1>
+   343→              <p className="text-xs text-neutral-400 leading-tight">
+   344→                Sinkronisasi lirik per kata &middot; Enhanced LRC
+   345→              </p>
+   346→            </div>
+   347→          </div>
+   348→          <div className="hidden sm:flex items-center gap-2 text-xs text-neutral-400">
+   349→            <Keyboard className="size-4" />
+   350→            <span>Spasi &middot; Enter &middot; Backspace</span>
+   351→          </div>
+   352→        </div>
+   353→      </header>
+   354→
+   355→      {/* Main */}
+   356→      <main className="flex-1 w-full max-w-5xl mx-auto px-4 py-6 space-y-6">
+   357→        {/* Step 1: Audio */}
+   358→        <Card className="py-5">
+   359→          <CardHeader className="pb-0">
+   360→            <CardTitle className="flex items-center gap-2 text-base">
+   361→              <Music className="size-4 text-amber-500" />
+   362→              1. Unggah Audio
+   363→            </CardTitle>
+   364→            <CardDescription>
+   365→              Pilih file audio (mp3, wav, ogg, dll.) yang didukung browser.
+   366→            </CardDescription>
+   367→          </CardHeader>
+   368→          <CardContent className="space-y-4">
+   369→            <div className="flex items-center gap-3 flex-wrap">
+   370→              <input
+   371→                ref={fileInputRef}
+   372→                type="file"
+   373→                accept="audio/*"
+   374→                onChange={handleAudioUpload}
+   375→                className="hidden"
+   376→                id="audio-file-input"
+   377→              />
+   378→              <Button
+   379→                type="button"
+   380→                variant="default"
+   381→                onClick={() => fileInputRef.current?.click()}
+   382→                className="bg-neutral-900 text-white hover:bg-neutral-700"
+   383→              >
+   384→                <Upload className="size-4" />
+   385→                Pilih File Audio
+   386→              </Button>
+   387→              {audioName && (
+   388→                <span className="text-sm text-neutral-600 truncate max-w-full">
+   389→                  <span className="font-medium text-neutral-800">{audioName}</span>
+   390→                  {restored && !audioUrl && (
+   391→                    <span className="text-amber-600"> (perlu diunggah ulang)</span>
+   392→                  )}
+   393→                </span>
+   394→              )}
+   395→            </div>
+   396→
+   397→            {audioUrl && (
+   398→              <div className="space-y-3">
+   399→                {/* Status play & waktu */}
+   400→                <div className="flex items-center gap-4">
+   401→                  <Button
+   402→                    type="button"
+   403→                    onClick={togglePlay}
+   404→                    size="icon"
+   405→                    className="size-12 rounded-full bg-neutral-900 text-white hover:bg-neutral-700 shrink-0"
+   406→                    aria-label={isPlaying ? 'Jeda' : 'Putar'}
+   407→                  >
+   408→                    {isPlaying ? (
+   409→                      <Pause className="size-5" />
+   410→                    ) : (
+   411→                      <Play className="size-5 ml-0.5" />
+   412→                    )}
+   413→                  </Button>
+   414→                  <div className="flex items-baseline gap-2 font-mono">
+   415→                    <span className="text-2xl font-bold tabular-nums text-neutral-900">
+   416→                      {formatTimestamp(currentTime)}
+   417→                    </span>
+   418→                    <span className="text-neutral-400">/</span>
+   419→                    <span className="text-sm tabular-nums text-neutral-500">
+   420→                      {formatTimestamp(duration)}
+   421→                    </span>
+   422→                  </div>
+   423→                  <div
+   424→                    className={`ml-auto text-xs font-medium px-2.5 py-1 rounded-full ${
+   425→                      isPlaying
+   426→                        ? 'bg-emerald-100 text-emerald-700'
+   427→                        : 'bg-neutral-100 text-neutral-500'
+   428→                    }`}
+   429→                  >
+   430→                    {isPlaying ? 'MEMUTAR' : 'DIJEDA'}
+   431→                  </div>
+   432→                </div>
+   433→
+   434→                {/* Progress bar yang bisa di-seek */}
+   435→                <div
+   436→                  onClick={handleSeek}
+   437→                  className="relative h-3 bg-neutral-200 rounded-full cursor-pointer group"
+   438→                  role="slider"
+   439→                  aria-valuenow={currentTime}
+   440→                  aria-valuemax={duration}
+   441→                  aria-valuemin={0}
+   442→                  aria-label="Posisi audio"
+   443→                  tabIndex={-1}
+   444→                >
+   445→                  <div
+   446→                    className="absolute inset-y-0 left-0 bg-neutral-900 rounded-full transition-[width] duration-75"
+   447→                    style={{ width: `${progress}%` }}
+   448→                  />
+   449→                  <div
+   450→                    className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 size-4 bg-white border-2 border-neutral-900 rounded-full shadow opacity-0 group-hover:opacity-100 transition-opacity"
+   451→                    style={{ left: `${progress}%` }}
+   452→                  />
+   453→                </div>
+   454→              </div>
+   455→            )}
+   456→
+   457→            {restored && !audioUrl && words.length > 0 && (
+   458→              <div className="rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-sm text-amber-800">
+   459→                Sesi tersimpan ditemukan. Silakan unggah ulang file audio yang
+   460→                sama untuk melanjutkan sinkronisasi &mdash; timestamp Anda tetap
+   461→                tersimpan.
+   462→              </div>
+   463→            )}
+   464→          </CardContent>
+   465→        </Card>
+   466→
+   467→        {/* Step 2: Lyrics input / edit toggle */}
+   468→        <Card className="py-5">
+   469→          <CardHeader className="pb-0">
+   470→            <div className="flex items-center justify-between gap-2 flex-wrap">
+   471→              <div className="space-y-1">
+   472→                <CardTitle className="flex items-center gap-2 text-base">
+   473→                  <FileText className="size-4 text-amber-500" />
+   474→                  2. Masukkan Lirik
+   475→                </CardTitle>
+   476→                <CardDescription>
+   477→                  Tempel lirik plain text, satu baris per baris lirik.
+   478→                </CardDescription>
+   479→              </div>
+   480→              {words.length > 0 && (
+   481→                <Button
+   482→                  type="button"
+   483→                  variant="outline"
+   484→                  size="sm"
+   485→                  onClick={() => setShowEditPanel((s) => !s)}
+   486→                >
+   487→                  {showEditPanel ? 'Sembunyikan' : 'Edit Lirik'}
+   488→                </Button>
+   489→              )}
+   490→            </div>
+   491→          </CardHeader>
+   492→          <CardContent className="space-y-3">
+   493→            {(showEditPanel || words.length === 0) && (
+   494→              <>
+   495→                <Textarea
+   496→                  value={lyricsText}
+   497→                  onChange={(e) => setLyricsText(e.target.value)}
+   498→                  placeholder={
+   499→                    'Contoh:\nHello world\nThis is the second line\n...'
+   500→                  }
+   501→                  className="min-h-32 font-mono text-sm resize-y"
+   502→                />
+   503→                <div className="flex gap-2 flex-wrap">
+   504→                  <Button
+   505→                    type="button"
+   506→                    onClick={loadLyrics}
+   507→                    disabled={!lyricsText.trim()}
+   508→                    className="bg-neutral-900 text-white hover:bg-neutral-700"
+   509→                  >
+   510→                    <Wand2 className="size-4" />
+   511→                    Load Lyrics
+   512→                  </Button>
+   513→                  <Button
+   514→                    type="button"
+   515→                    variant="outline"
+   516→                    onClick={() => setLyricsText('')}
+   517→                    disabled={!lyricsText}
+   518→                  >
+   519→                    <Trash2 className="size-4" />
+   520→                    Bersihkan Teks
+   521→                  </Button>
+   522→                </div>
+   523→              </>
+   524→            )}
+   525→            {words.length > 0 && !showEditPanel && (
+   526→              <p className="text-sm text-neutral-500">
+   527→                {words.length} kata dimuat dari {groupedWords.length} baris.{' '}
+   528→                <button
+   529→                  type="button"
+   530→                  className="text-neutral-900 underline underline-offset-2 hover:text-amber-600"
+   531→                  onClick={() => setShowEditPanel(true)}
+   532→                >
+   533→                  Buka editor
+   534→                </button>{' '}
+   535→                untuk mengubah lirik.
+   536→              </p>
+   537→            )}
+   538→          </CardContent>
+   539→        </Card>
+   540→
+   541→        {/* Step 3: Sync workspace */}
+   542→        {words.length > 0 && (
+   543→          <Card className="py-5">
+   544→            <CardHeader className="pb-0">
+   545→              <div className="flex items-center justify-between gap-2 flex-wrap">
+   546→                <div className="space-y-1">
+   547→                  <CardTitle className="flex items-center gap-2 text-base">
+   548→                    <Wand2 className="size-4 text-amber-500" />
+   549→                    3. Sinkronisasi
+   550→                  </CardTitle>
+   551→                  <CardDescription>
+   552→                    Putar audio, lalu tekan <strong>Enter</strong> tepat saat
+   553→                    kata aktif harus mulai terdengar.
+   554→                  </CardDescription>
+   555→                </div>
+   556→                <div className="flex items-center gap-2">
+   557→                  <span
+   558→                    className={`text-sm font-semibold px-2.5 py-1 rounded-full ${
+   559→                      allSynced
+   560→                        ? 'bg-emerald-100 text-emerald-700'
+   561→                        : 'bg-neutral-100 text-neutral-700'
+   562→                    }`}
+   563→                  >
+   564→                    {syncedCount}/{words.length} kata ({syncedPct}%)
+   565→                  </span>
+   566→                </div>
+   567→              </div>
+   568→            </CardHeader>
+   569→            <CardContent className="space-y-4">
+   570→              {/* Instruksi */}
+   571→              <div className="rounded-lg bg-neutral-100 border border-neutral-200 px-4 py-3 text-sm">
+   572→                <div className="grid sm:grid-cols-2 gap-x-6 gap-y-1.5">
+   573→                  <p className="flex items-center gap-2">
+   574→                    <Kbd>Spasi</Kbd>
+   575→                    <span className="text-neutral-600">Putar / Jeda audio</span>
+   576→                  </p>
+   577→                  <p className="flex items-center gap-2">
+   578→                    <Kbd>Enter</Kbd>
+   579→                    <span className="text-neutral-600">
+   580→                      Catat timestamp kata aktif &amp; lanjut
+   581→                    </span>
+   582→                  </p>
+   583→                  <p className="flex items-center gap-2">
+   584→                    <Kbd>Backspace</Kbd>
+   585→                    <span className="text-neutral-600">
+   586→                      Mundur satu kata (Undo)
+   587→                    </span>
+   588→                  </p>
+   589→                  <p className="flex items-center gap-2">
+   590→                    <Kbd>Klik kata</Kbd>
+   591→                    <span className="text-neutral-600">
+   592→                      Pindahkan pointer ke kata itu
+   593→                    </span>
+   594→                  </p>
+   595→                </div>
+   596→              </div>
+   597→
+   598→              {/* Pointer aktif info */}
+   599→              <div className="rounded-lg bg-amber-50 border border-amber-300 px-4 py-3 flex items-center gap-3 flex-wrap">
+   600→                <span className="text-xs font-semibold uppercase tracking-wide text-amber-700">
+   601→                  Kata Aktif
+   602→                </span>
+   603→                <span className="text-lg font-bold text-neutral-900 break-all">
+   604→                  {pointer < words.length ? words[pointer].text : '—'}
+   605→                </span>
+   606→                <span className="ml-auto text-xs text-amber-800 font-mono">
+   607→                  Baris {pointer < words.length ? words[pointer].lineIndex + 1 : '-'}{' '}
+   608→                  &middot; Kata ke-{pointer + 1}/{words.length}
+   609→                </span>
+   610→              </div>
+   611→
+   612→              {/* Daftar kata */}
+   613→              <div className="max-h-[60vh] overflow-y-auto rounded-lg border border-neutral-200 bg-white p-4 custom-scroll">
+   614→                <div className="space-y-3">
+   615→                  {groupedWords.map((group) => (
+   616→                    <div
+   617→                      key={group.lineIndex}
+   618→                      className="flex flex-wrap items-start gap-1.5"
+   619→                    >
+   620→                      <span className="text-[10px] font-mono text-neutral-400 mt-1.5 mr-1 select-none shrink-0">
+   621→                        L{group.lineIndex + 1}
+   622→                      </span>
+   623→                      {group.items.map(({ word, globalIdx }) => {
+   624→                        const isActive = globalIdx === pointer
+   625→                        const isSynced = word.timestamp !== null
+   626→                        return (
+   627→                          <button
+   628→                            key={globalIdx}
+   629→                            type="button"
+   630→                            onClick={() => setPointer(globalIdx)}
+   631→                            className={`px-2.5 py-1 rounded-md text-sm leading-tight transition-all duration-150 text-left ${
+   632→                              isActive
+   633→                                ? 'bg-amber-300 text-neutral-900 font-bold ring-2 ring-amber-500 scale-105 shadow-sm'
+   634→                                : isSynced
+   635→                                ? 'bg-emerald-100 text-emerald-900 hover:bg-emerald-200 hover:scale-105'
+   636→                                : 'bg-neutral-100 text-neutral-500 hover:bg-neutral-200 hover:text-neutral-800'
+   637→                            }`}
+   638→                            title={
+   639→                              isSynced
+   640→                                ? `${word.text} @ ${formatTimestamp(word.timestamp!)}`
+   641→                                : `${word.text} (belum tersinkronisasi)`
+   642→                            }
+   643→                          >
+   644→                            {word.text}
+   645→                            {isSynced && (
+   646→                              <span className="block text-[10px] font-mono opacity-70 mt-0.5 tabular-nums">
+   647→                                {formatTimestamp(word.timestamp!)}
+   648→                              </span>
+   649→                            )}
+   650→                          </button>
+   651→                        )
+   652→                      })}
+   653→                    </div>
+   654→                  ))}
+   655→                </div>
+   656→              </div>
+   657→
+   658→              {/* Tombol kontrol */}
+   659→              <div className="flex gap-2 flex-wrap pt-1">
+   660→                <Button
+   661→                  type="button"
+   662→                  variant="outline"
+   663→                  onClick={undo}
+   664→                  disabled={pointer === 0}
+   665→                >
+   666→                  <Undo2 className="size-4" />
+   667→                  Undo
+   668→                </Button>
+   669→                <Button
+   670→                  type="button"
+   671→                  onClick={exportLrc}
+   672→                  className="bg-emerald-600 text-white hover:bg-emerald-700"
+   673→                >
+   674→                  <Download className="size-4" />
+   675→                  Export .lrc
+   676→                </Button>
+   677→                <Button
+   678→                  type="button"
+   679→                  variant="outline"
+   680→                  onClick={clearTimestamps}
+   681→                  disabled={syncedCount === 0}
+   682→                >
+   683→                  <RotateCcw className="size-4" />
+   684→                  Reset Timestamp
+   685→                </Button>
+   686→                <Button
+   687→                  type="button"
+   688→                  variant="ghost"
+   689→                  onClick={resetAll}
+   690→                  className="text-red-600 hover:text-red-700 hover:bg-red-50"
+   691→                >
+   692→                  <Trash2 className="size-4" />
+   693→                  Reset Semua
+   694→                </Button>
+   695→              </div>
+   696→
+   697→              {allSynced && (
+   698→                <div className="rounded-md bg-emerald-50 border border-emerald-200 px-4 py-2 text-sm text-emerald-800">
+   699→                  Semua kata sudah tersinkronisasi. Anda bisa mengeklik{' '}
+   700→                  <strong>Export .lrc</strong> untuk mengunduh file Enhanced LRC.
+   701→                </div>
+   702→              )}
+   703→            </CardContent>
+   704→          </Card>
+   705→        )}
+   706→
+   707→        {words.length === 0 && (
+   708→          <div className="text-center py-8 text-sm text-neutral-400">
+   709→            Belum ada lirik. Masukkan lirik di atas lalu klik{' '}
+   710→            <strong>Load Lyrics</strong>.
+   711→          </div>
+   712→        )}
+   713→      </main>
+   714→
+   715→      {/* Footer */}
+   716→      <footer className="bg-neutral-900 text-neutral-400 mt-auto">
+   717→        <div className="max-w-5xl mx-auto px-4 py-4 text-center text-xs sm:text-sm">
+   718→          Progres tersinkronisasi otomatis disimpan di browser
+   719→          (localStorage).{' '}
+   720→          <span className="text-neutral-300">
+   721→            Nama file unduhan mengikuti nama audio ({'<nama-audio>'}.lrc).
+   722→          </span>
+   723→        </div>
+   724→      </footer>
+   725→
+   726→      {/* Custom scrollbar styling */}
+   727→      <style jsx global>{`
+   728→        .custom-scroll::-webkit-scrollbar {
+   729→          width: 8px;
+   730→        }
+   731→        .custom-scroll::-webkit-scrollbar-track {
+   732→          background: transparent;
+   733→        }
+   734→        .custom-scroll::-webkit-scrollbar-thumb {
+   735→          background: #d4d4d4;
+   736→          border-radius: 4px;
+   737→        }
+   738→        .custom-scroll::-webkit-scrollbar-thumb:hover {
+   739→          background: #a3a3a3;
+   740→        }
+   741→      `}</style>
+   742→    </div>
+   743→  )
+   744→}
+   745→
+   746→/** Komponen kecil untuk menampilkan tombol keyboard */
+   747→function Kbd({ children }: { children: React.ReactNode }) {
+   748→  return (
+   749→    <kbd className="inline-flex items-center justify-center min-w-[1.5rem] h-6 px-1.5 rounded border border-neutral-300 border-b-2 bg-white text-neutral-700 text-xs font-mono font-semibold shadow-sm">
+   750→      {children}
+   751→    </kbd>
+   752→  )
+   753→}
+   754→

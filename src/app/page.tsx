@@ -23,6 +23,7 @@ import {
   FileText,
   Wand2,
   Keyboard,
+  Gauge,
 } from 'lucide-react'
 
 interface Word {
@@ -36,9 +37,13 @@ interface SavedState {
   words: Word[]
   pointer: number
   audioName: string
+  playbackRate?: number
 }
 
 const STORAGE_KEY = 'lrc-sync-state-v1'
+
+/** Pilihan kecepatan pemutaran (memperlambat lagu bertempo cepat) */
+const SPEED_PRESETS = [0.5, 0.75, 1, 1.25, 1.5]
 
 /** Format detik -> mm:ss.xx (Enhanced LRC, centisecond 2 digit) */
 function formatTimestamp(seconds: number): string {
@@ -61,9 +66,13 @@ export default function Home() {
   const [isPlaying, setIsPlaying] = useState(false)
   const [restored, setRestored] = useState(false)
   const [showEditPanel, setShowEditPanel] = useState(false)
+  const [playbackRate, setPlaybackRate] = useState(1)
 
   const audioRef = useRef<HTMLAudioElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const lyricsScrollRef = useRef<HTMLDivElement>(null)
+  const wordRefs = useRef<(HTMLButtonElement | null)[]>([])
+  const prevLineRef = useRef<number | null>(null)
 
   // --- Restore dari localStorage saat mount ---
   useEffect(() => {
@@ -75,6 +84,9 @@ export default function Home() {
         if (Array.isArray(data.words)) setWords(data.words)
         if (typeof data.pointer === 'number') setPointer(data.pointer)
         if (typeof data.audioName === 'string') setAudioName(data.audioName)
+        if (typeof data.playbackRate === 'number' && data.playbackRate > 0) {
+          setPlaybackRate(data.playbackRate)
+        }
       }
     } catch (e) {
       console.error('Gagal memuat data tersimpan', e)
@@ -87,12 +99,18 @@ export default function Home() {
   useEffect(() => {
     if (!restored) return
     try {
-      const data: SavedState = { lyricsText, words, pointer, audioName }
+      const data: SavedState = {
+        lyricsText,
+        words,
+        pointer,
+        audioName,
+        playbackRate,
+      }
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
     } catch (e) {
       console.error('Gagal menyimpan progres', e)
     }
-  }, [lyricsText, words, pointer, audioName, restored])
+  }, [lyricsText, words, pointer, audioName, playbackRate, restored])
 
   // --- Update waktu audio secara halus dengan rAF ---
   useEffect(() => {
@@ -107,6 +125,21 @@ export default function Home() {
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
   }, [])
+
+  // --- Terapkan playbackRate & preservesPitch ke elemen audio ---
+  useEffect(() => {
+    const audio = audioRef.current
+    if (!audio) return
+    const a = audio as HTMLAudioElement & { preservesPitch?: boolean }
+    a.playbackRate = playbackRate
+    // Pertahankan nada asli saat kecepatan diubah agar tidak terdengar
+    // terlalu rendah saat diperlambat.
+    try {
+      a.preservesPitch = true
+    } catch {
+      /* noop */
+    }
+  }, [playbackRate, audioUrl])
 
   // --- Upload audio ---
   const handleAudioUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -249,6 +282,40 @@ export default function Home() {
   const allSynced = words.length > 0 && syncedCount === words.length
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0
 
+  // --- Auto-scroll area lirik saat baris aktif berubah ---
+  // Hanya scroll jika kata aktif berpindah ke baris yang berbeda dari sebelumnya,
+  // sehingga pengguna tidak perlu menscroll manual saat pointer mencapai bawah.
+  const scrollActiveIntoView = useCallback((idx: number, smooth = true) => {
+    const container = lyricsScrollRef.current
+    const el = wordRefs.current[idx]
+    if (!container || !el) return
+    const containerRect = container.getBoundingClientRect()
+    const elRect = el.getBoundingClientRect()
+    const margin = 64
+    const isVisible =
+      elRect.top >= containerRect.top + margin &&
+      elRect.bottom <= containerRect.bottom - margin
+    if (isVisible) return
+    const offset = elRect.top - containerRect.top + container.scrollTop
+    const target = offset - container.clientHeight / 2 + elRect.height / 2
+    container.scrollTo({
+      top: Math.max(0, target),
+      behavior: smooth ? 'smooth' : 'auto',
+    })
+  }, [])
+
+  useEffect(() => {
+    if (words.length === 0) {
+      prevLineRef.current = null
+      return
+    }
+    const curLine = words[pointer]?.lineIndex ?? null
+    if (curLine !== prevLineRef.current) {
+      scrollActiveIntoView(pointer, true)
+      prevLineRef.current = curLine
+    }
+  }, [pointer, words, scrollActiveIntoView])
+
   // --- Export Enhanced LRC ---
   const exportLrc = useCallback(() => {
     if (words.length === 0) return
@@ -298,6 +365,7 @@ export default function Home() {
     setCurrentTime(0)
     setDuration(0)
     setShowEditPanel(false)
+    setPlaybackRate(1)
     if (fileInputRef.current) fileInputRef.current.value = ''
     try {
       localStorage.removeItem(STORAGE_KEY)
@@ -450,6 +518,37 @@ export default function Home() {
                     className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 size-4 bg-white border-2 border-neutral-900 rounded-full shadow opacity-0 group-hover:opacity-100 transition-opacity"
                     style={{ left: `${progress}%` }}
                   />
+                </div>
+
+                {/* Kontrol kecepatan pemutaran */}
+                <div className="flex items-center gap-2 flex-wrap pt-1">
+                  <span className="text-xs font-medium text-neutral-500 flex items-center gap-1.5">
+                    <Gauge className="size-3.5" />
+                    Kecepatan
+                  </span>
+                  <div className="flex items-center gap-1">
+                    {SPEED_PRESETS.map((rate) => (
+                      <button
+                        key={rate}
+                        type="button"
+                        onClick={() => setPlaybackRate(rate)}
+                        className={`px-2.5 py-1 rounded-md text-xs font-mono font-semibold transition-all ${
+                          playbackRate === rate
+                            ? 'bg-neutral-900 text-white'
+                            : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+                        }`}
+                        aria-label={`Kecepatan ${rate}x`}
+                        aria-pressed={playbackRate === rate}
+                      >
+                        {rate}x
+                      </button>
+                    ))}
+                  </div>
+                  {playbackRate !== 1 && (
+                    <span className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 px-2 py-1 rounded-md">
+                      Timestamp tetap mencatat posisi audio asli
+                    </span>
+                  )}
                 </div>
               </div>
             )}
@@ -610,7 +709,10 @@ export default function Home() {
               </div>
 
               {/* Daftar kata */}
-              <div className="max-h-[60vh] overflow-y-auto rounded-lg border border-neutral-200 bg-white p-4 custom-scroll">
+              <div
+                ref={lyricsScrollRef}
+                className="max-h-[60vh] overflow-y-auto rounded-lg border border-neutral-200 bg-white p-4 custom-scroll"
+              >
                 <div className="space-y-3">
                   {groupedWords.map((group) => (
                     <div
@@ -627,6 +729,9 @@ export default function Home() {
                           <button
                             key={globalIdx}
                             type="button"
+                            ref={(el) => {
+                              wordRefs.current[globalIdx] = el
+                            }}
                             onClick={() => setPointer(globalIdx)}
                             className={`px-2.5 py-1 rounded-md text-sm leading-tight transition-all duration-150 text-left ${
                               isActive
