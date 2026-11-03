@@ -24,6 +24,7 @@ import {
   Wand2,
   Keyboard,
   Gauge,
+  Flag,
 } from 'lucide-react'
 
 interface Word {
@@ -587,6 +588,72 @@ export default function Home() {
     }
     prevLineRef.current = null
   }, [mode])
+
+  // --- Gestur tombol kecepatan (bar bawah): klik=kurangi, klik ganda=naikkan, tahan lama=reset ---
+  const speedHoldTimer = useRef<number | null>(null)
+  const speedClickTimer = useRef<number | null>(null)
+  const speedLongPressed = useRef(false)
+
+  const clearSpeedHold = () => {
+    if (speedHoldTimer.current !== null) {
+      window.clearTimeout(speedHoldTimer.current)
+      speedHoldTimer.current = null
+    }
+  }
+
+  const stepSpeed = (dir: 1 | -1) => {
+    setPlaybackRate((r) => {
+      const i = Math.max(SPEED_PRESETS.indexOf(r), 0)
+      return SPEED_PRESETS[
+        Math.min(Math.max(i + dir, 0), SPEED_PRESETS.length - 1)
+      ]
+    })
+  }
+
+  const handleSpeedPointerDown = () => {
+    speedLongPressed.current = false
+    clearSpeedHold()
+    speedHoldTimer.current = window.setTimeout(() => {
+      speedLongPressed.current = true
+      // Tekan lama membatalkan penurunan yang masih tertunda
+      if (speedClickTimer.current !== null) {
+        window.clearTimeout(speedClickTimer.current)
+        speedClickTimer.current = null
+      }
+      setPlaybackRate(1)
+    }, 500)
+  }
+
+  const handleSpeedClick = () => {
+    if (speedLongPressed.current) {
+      speedLongPressed.current = false
+      return
+    }
+    if (speedClickTimer.current !== null) {
+      // Klik ganda: batalkan penurunan yang tertunda, hanya naik satu langkah
+      window.clearTimeout(speedClickTimer.current)
+      speedClickTimer.current = null
+      stepSpeed(1)
+      return
+    }
+    // Tunggu ~300ms dulu agar klik kedua sempat membatalkan penurunan
+    speedClickTimer.current = window.setTimeout(() => {
+      speedClickTimer.current = null
+      stepSpeed(-1)
+    }, 300)
+  }
+
+  // Bersihkan timer gestur saat unmount
+  useEffect(() => {
+    return () => {
+      if (speedHoldTimer.current !== null) {
+        window.clearTimeout(speedHoldTimer.current)
+      }
+      if (speedClickTimer.current !== null) {
+        window.clearTimeout(speedClickTimer.current)
+      }
+    }
+  }, [])
 
   // --- Turunan untuk tampilan ---
   const syncedPct =
@@ -1153,7 +1220,7 @@ export default function Home() {
       </main>
 
       {/* Footer */}
-      <footer className="bg-neutral-900 text-neutral-400 mt-auto">
+      <footer className="bg-neutral-900 text-neutral-400 mt-auto pb-28 lg:pb-0">
         <div className="max-w-5xl mx-auto px-4 py-4 text-center text-xs sm:text-sm">
           Progres tersinkronisasi otomatis disimpan di browser (localStorage).{' '}
           <span className="text-neutral-300">
@@ -1162,6 +1229,53 @@ export default function Home() {
           </span>
         </div>
       </footer>
+
+      {/* Mobile & Tablet Bottom Navigation (tersembunyi di layar ≥1024px) */}
+      <div className="fixed bottom-0 inset-x-0 z-50 bg-neutral-900/90 backdrop-blur-md border-t border-neutral-200 text-neutral-400 lg:hidden pt-2 pb-[env(safe-area-inset-bottom)] select-none">
+        <div className="max-w-5xl mx-auto px-4 pb-2 flex items-center justify-center gap-3">
+          {/* Play/Pause */}
+          <Button
+            type="button"
+            onClick={togglePlay}
+            size="icon"
+            className="size-12 rounded-full bg-neutral-900 text-white hover:bg-neutral-700 shrink-0"
+            aria-label={isPlaying ? 'Jeda' : 'Putar'}
+          >
+            {isPlaying ? (
+              <Pause className="size-5" />
+            ) : (
+              <Play className="size-5 ml-0.5" />
+            )}
+          </Button>
+
+          {/* Sinkronisasi (selalu tampil, mode simple & enhanced) */}
+          <Button
+            type="button"
+            onClick={recordTimestamp}
+            size="icon"
+            className="size-12 rounded-full bg-neutral-900 text-white hover:bg-neutral-700 shrink-0"
+            aria-label="Sinkronisasi"
+          >
+            <Flag className="size-5" />
+          </Button>
+
+          {/* Kecepatan: klik=kurangi, klik ganda (~300ms)=naikkan, tahan lama (~500ms)=reset */}
+          <button
+            type="button"
+            onPointerDown={handleSpeedPointerDown}
+            onPointerUp={clearSpeedHold}
+            onPointerLeave={clearSpeedHold}
+            onPointerCancel={clearSpeedHold}
+            onClick={handleSpeedClick}
+            onContextMenu={(e) => e.preventDefault()}
+            aria-label={`Kecepatan audio, saat ini ${playbackRate}x`}
+            className="h-12 min-w-16 px-4 rounded-full bg-neutral-900 text-white hover:bg-neutral-700 flex items-center justify-center gap-1.5 text-sm font-mono font-semibold transition-transform active:scale-95 touch-manipulation select-none shrink-0"
+          >
+            <Gauge className="size-5 shrink-0" />
+            {playbackRate}x
+          </button>
+        </div>
+      </div>
 
       {/* Custom scrollbar styling */}
       <style jsx global>{`
